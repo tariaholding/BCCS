@@ -1,0 +1,59 @@
+# ============================================================
+# BCCS — Dépendances Python (versions stabilisées 2026)
+# ============================================================
+# Généré pour Python 3.11 / 3.12
+# Mettre à jour via : pip-compile requirements.in --upgrade
+# ============================================================
+
+# --- LlamaIndex core ---
+llama-index-core==0.12.6
+llama-index-llms-ollama==0.5.0
+llama-index-embeddings-ollama==0.5.0
+llama-index-vector-stores-qdrant==0.5.0
+llama-index-readers-file==0.4.0          # Chargeurs PDF, DOCX, HTML, CSV
+
+# --- Qdrant ---
+qdrant-client==1.13.2
+
+# --- Parsing de documents ---
+pypdf==5.4.0                             # PDF natif (successeur de PyPDF2)
+python-docx==1.1.2                       # DOCX
+beautifulsoup4==4.13.3                   # HTML
+lxml==5.3.0                              # Parser HTML rapide
+unstructured==0.17.2                     # Pipeline d'extraction universelle
+pytesseract==0.3.13                      # OCR pour PDF scannés (optionnel)
+Pillow==11.2.1                           # Images embarquées
+
+# --- Interface utilisateur ---
+streamlit==1.45.0
+streamlit-chat==0.1.1
+
+# --- API interne ---
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+
+# --- Traitement de données ---
+pandas==2.3.0
+numpy==2.2.5
+
+# --- Utilitaires ---
+python-dotenv==1.1.0                     # Chargement .env
+pydantic==2.11.4                         # Validation des données
+pydantic-settings==2.9.1
+tenacity==9.1.2                          # Retry avec backoff exponentiel
+rich==14.0.0                             # Logging coloré en CLI
+tqdm==4.67.1                             # Barres de progression
+
+# --- Sécurité ---
+cryptography==44.0.3
+
+# --- Tests ---
+pytest==8.3.5
+pytest-cov==6.1.0
+pytest-asyncio==0.26.0
+pytest-mock==3.14.0
+ruff==0.11.8                             # Linter + formateur
+mypy==1.15.0
+types-beautifulsoup4==4.12.0.20250204
+types-tqdm==4.67.0.20250417

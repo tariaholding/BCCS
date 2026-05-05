@@ -1,0 +1,142 @@
+name: CD — Déploiement Production
+
+# ============================================================
+# Ce workflow se déclenche à chaque push sur main.
+# Il se connecte en SSH au serveur de destination et exécute
+# git pull + docker compose up --build -d.
+#
+# Secrets GitHub requis (Settings → Secrets → Actions) :
+#   SERVER_IP   — Adresse IP publique du serveur
+#   SERVER_USER — Utilisateur SSH (ex. : ubuntu, debian)
+#   SSH_KEY     — Clé privée SSH (contenu du fichier id_rsa/id_ed25519)
+# ============================================================
+
+on:
+  push:
+    branches:
+      - main
+
+# Un seul déploiement à la fois — annule le précédent si en cours
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------
+  # Job 1 : Tests rapides avant déploiement
+  # ------------------------------------------------------------
+  pre-deploy-tests:
+    name: Tests pré-déploiement
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Installer les dépendances de test
+        run: |
+          pip install --upgrade pip
+          pip install pytest pytest-cov ruff
+          # Dépendances légères pour les tests unitaires (sans Ollama/Qdrant)
+          pip install llama-index-core qdrant-client pydantic
+
+      - name: Lint (ruff)
+        run: ruff check src/
+
+      - name: Tests unitaires (sans services externes)
+        run: |
+          pytest src/test_engine.py \
+            -v \
+            --ignore-glob="*integration*" \
+            -m "not integration" \
+            --tb=short
+
+  # ------------------------------------------------------------
+  # Job 2 : Déploiement SSH
+  # ------------------------------------------------------------
+  deploy:
+    name: Déploiement sur serveur souverain
+    runs-on: ubuntu-latest
+    needs: pre-deploy-tests          # Bloqué si les tests échouent
+
+    environment:
+      name: production
+      url: http://${{ secrets.SERVER_IP }}:8501
+
+    steps:
+      - name: Checkout (pour les métadonnées)
+        uses: actions/checkout@v4
+
+      - name: Configurer la clé SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Désactiver la vérification stricte de l'hôte pour la CI
+          cat >> ~/.ssh/config << EOF
+          Host deploy-target
+            HostName ${{ secrets.SERVER_IP }}
+            User ${{ secrets.SERVER_USER }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            ConnectTimeout 30
+          EOF
+
+      - name: Vérifier la connectivité SSH
+        run: ssh deploy-target "echo '✅ Connexion SSH établie — $(hostname)'"
+
+      - name: Déployer sur le serveur
+        run: |
+          ssh deploy-target << 'REMOTE_SCRIPT'
+            set -euo pipefail
+
+            echo "📁 Accès au répertoire du projet…"
+            cd /opt/bccs-souveraine-2026
+
+            echo "🔄 Récupération des dernières modifications…"
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "🐳 Reconstruction et redémarrage des conteneurs…"
+            docker compose pull --quiet
+            docker compose up --build -d --remove-orphans
+
+            echo "⏳ Attente de la disponibilité des services (60s max)…"
+            timeout 60 bash -c \
+              'until curl -sf http://localhost:8501/_stcore/health; do sleep 3; done'
+
+            echo "🧹 Nettoyage des images obsolètes…"
+            docker image prune -f
+
+            echo "✅ Déploiement terminé — $(date '+%Y-%m-%d %H:%M:%S')"
+          REMOTE_SCRIPT
+
+      - name: Vérification post-déploiement
+        run: |
+          echo "🔍 Vérification de l'interface exposée…"
+          curl -sf --retry 5 --retry-delay 5 \
+            "http://${{ secrets.SERVER_IP }}:8501/_stcore/health" \
+            && echo "✅ Interface BCCS opérationnelle" \
+            || (echo "❌ L'interface ne répond pas" && exit 1)
+
+      - name: Nettoyer la clé SSH
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Résumé du déploiement
+        if: success()
+        run: |
+          echo "## 🏛️ Déploiement BCCS réussi" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Paramètre | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit    | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branche   | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auteur    | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Interface | http://${{ secrets.SERVER_IP }}:8501 |" >> $GITHUB_STEP_SUMMARY
