@@ -1,0 +1,182 @@
+# ============================================================
+# BCCS — Stack Production
+# Base de Connaissance Citoyenne Souveraine
+#
+# Architecture réseau :
+#   bccs-public   → seule l'UI (bccs-app) y est exposée
+#   bccs-internal → LLM (ollama) + VectorDB (qdrant) isolés
+#
+# Usage :
+#   docker compose up -d
+#   docker compose logs -f bccs-app
+# ============================================================
+
+name: bccs
+
+# -----------------------------------------------------------
+# RÉSEAUX
+# -----------------------------------------------------------
+networks:
+  bccs-public:
+    name: bccs-public
+    driver: bridge
+
+  bccs-internal:
+    name: bccs-internal
+    driver: bridge
+    internal: true          # ← Pas d'accès Internet depuis ce réseau
+
+# -----------------------------------------------------------
+# VOLUMES PERSISTANTS
+# -----------------------------------------------------------
+volumes:
+  qdrant-storage:
+    name: bccs-qdrant-storage
+  ollama-models:
+    name: bccs-ollama-models
+
+# -----------------------------------------------------------
+# SERVICES
+# -----------------------------------------------------------
+services:
+
+  # ----------------------------------------------------------
+  # 1. OLLAMA — Inférence LLM locale
+  # ----------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: bccs-ollama
+    restart: unless-stopped
+
+    volumes:
+      - ollama-models:/root/.ollama   # Persistance des modèles téléchargés
+
+    networks:
+      - bccs-internal                 # Uniquement sur le réseau interne
+
+    # Décommentez si vous avez un GPU NVIDIA
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h         # Garde le modèle en RAM
+      - OLLAMA_NUM_PARALLEL=2         # Requêtes parallèles max
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s              # Laisse le temps au modèle de charger
+
+    # Pas de ports exposés publiquement — accessible uniquement via bccs-internal
+    # Port interne : 11434
+
+  # ----------------------------------------------------------
+  # 2. QDRANT — Base vectorielle souveraine
+  # ----------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    container_name: bccs-qdrant
+    restart: unless-stopped
+
+    volumes:
+      - qdrant-storage:/qdrant/storage # Persistance des collections vectorielles
+
+    networks:
+      - bccs-internal                  # Uniquement sur le réseau interne
+
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+      # Activer l'authentification en production :
+      # - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:6333/readyz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    # Ports internes uniquement :
+    #   6333 → API REST
+    #   6334 → API gRPC
+
+  # ----------------------------------------------------------
+  # 3. BCCS-APP — Interface citoyenne (seul service public)
+  # ----------------------------------------------------------
+  bccs-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_ENV=production
+
+    image: bccs-app:latest
+    container_name: bccs-app
+    restart: unless-stopped
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+    networks:
+      - bccs-public                   # Exposé vers l'extérieur
+      - bccs-internal                 # Peut joindre ollama et qdrant
+
+    ports:
+      - "8501:8501"                   # Seul port ouvert vers le monde
+
+    environment:
+      # Collectivité
+      - BCCS_COLLECTIVITE_NOM=${BCCS_COLLECTIVITE_NOM:-Ma Collectivité}
+      - BCCS_COLLECTIVITE_LOGO=${BCCS_COLLECTIVITE_LOGO:-}
+
+      # Connexion Ollama (réseau interne)
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral:7b-instruct}
+
+      # Connexion Qdrant (réseau interne)
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-bccs-documents}
+      # - QDRANT_API_KEY=${QDRANT_API_KEY}
+
+      # RAG — paramètres de retrieval
+      - RAG_TOP_K=${RAG_TOP_K:-5}
+      - RAG_SCORE_THRESHOLD=${RAG_SCORE_THRESHOLD:-0.6}
+      - RAG_CHUNK_SIZE=${RAG_CHUNK_SIZE:-512}
+      - RAG_CHUNK_OVERLAP=${RAG_CHUNK_OVERLAP:-64}
+
+      # Sécurité
+      - PYTHONUNBUFFERED=1
+      - TZ=Europe/Paris
+
+    volumes:
+      - ./data/raw:/app/data/raw:ro   # Documents sources en lecture seule
+      - ./logs:/app/logs              # Journaux locaux
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    # Limite les ressources pour éviter la saturation du serveur
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
